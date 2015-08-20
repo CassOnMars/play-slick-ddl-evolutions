@@ -44,7 +44,7 @@ object TableScanner {
     val foundInstances: List[(Symbol, Any)] = if (subTypeOf(outerSym, tableQueryTypeSymbol) && !isWildCard) { //name was referencing a specific value
       logger.debug("scanModulesAndFields for: found table query instance (not wildcard): " + name)
       List(baseSym -> outerInstance)
-    } else if (isWildCard) { 
+    } else if (isWildCard) {
       //wildcard so we scan the instance we found for table queries
       val instancesNsyms = ReflectionUtils.scanModuleOrFieldByReflection(baseSym, outerSym, outerInstance)(subTypeOf(_, tableQueryTypeSymbol))
       if (instancesNsyms.isEmpty) logger.warn("Scanned object: '" + baseSym.fullName + "' for '" + name + "' but did not find any Slick Tables")
@@ -72,17 +72,18 @@ object TableScanner {
 
   private def classToDDL(driver: slick.profile.SqlProfile, className: String, tableSymbol: Symbol)(implicit mirror: Mirror): Option[(Symbol, DDL)] = {
     try {
-      logger.debug("classToDDL for: " + className)
+      logger.info("classToDDL for: " + className)
       val classSymbol = mirror.staticClass(className)
-      val constructorSymbol = classSymbol.typeSignature.declaration(universe.nme.CONSTRUCTOR)
+      val constructorSymbol = classSymbol.typeSignature.decl(universe.termNames.CONSTRUCTOR)
       if (subTypeOf(classSymbol, tableSymbol) && constructorSymbol.isMethod) {
-        logger.debug("classToDDL for: " + className + " is table and has constructor")
+        logger.info("classToDDL for: " + className + " is table and has constructor")
         val constructorMethod = constructorSymbol.asMethod
         val reflectedClass = mirror.reflectClass(classSymbol)
         val constructor = reflectedClass.reflectConstructor(constructorMethod)
         import driver.simple._
         logSlickException {
           Some(classSymbol -> TableQuery { tag =>
+            constructorMethod.paramLists.foreach { l => logger.info("classToDDL: " + l.map(m => m.fullName + ": " + m.typeSignature.toString).mkString(";")) }
             val instance = constructor(tag)
             instance.asInstanceOf[Table[_]]
           }.ddl)
@@ -98,16 +99,16 @@ object TableScanner {
         logger.warn("Could not initialize " + className + ". DDL Generation will be skipped.")
         None
       case e: MissingRequirementError =>
-        logger.debug("MissingRequirementError for " + className + ". Probably means this is not a class. DDL Generation will be skipped.")
+        logger.info("MissingRequirementError for " + className + ". Probably means this is not a class. DDL Generation will be skipped.")
         None
       case e: ScalaReflectionException =>
-        logger.debug("ScalaReflectionException for " + className + ". Probably means this is not a class. DDL Generation will be skipped.")
+        logger.info("ScalaReflectionException for " + className + ". Probably means this is not a class. DDL Generation will be skipped.")
         None
       case e: AssertionError if e.getMessage.contains("not a type") =>
-        logger.debug(s"Class $className couldn't be reflected into a Scala symbol. DDL Generation will be skipped: ${e.getMessage}")
+        logger.info(s"Class $className couldn't be reflected into a Scala symbol. DDL Generation will be skipped: ${e.getMessage}")
         None
       case e: AssertionError if e.getMessage.contains("no symbol could be loaded") =>
-        logger.debug(s"Class $className couldn't be reflected into a Scala symbol. DDL Generation will be skipped: ${e.getMessage}")
+        logger.info(s"Class $className couldn't be reflected into a Scala symbol. DDL Generation will be skipped: ${e.getMessage}")
         None
     }
   }
@@ -155,9 +156,9 @@ object TableScanner {
         logger.error("Could not find any classes or table queries for: " + name + "")
       currentDDLs
     }
-    
+
     logger.debug(s"reflectAllDDLMethods(), will generate DDL for: ${ddls.toMap.keys.map(_.fullName).mkString(", ")}")
-    
+
     ddls.groupBy(_._1.fullName).flatMap {
       case (name, ddls) =>
         if (ddls.size > 1) logger.warn(s"Found multiple ddls ${ddls.size} for: $name")

@@ -6,24 +6,85 @@ import javax.inject.Inject
 import javax.sql.DataSource
 import play.api.Logger
 import play.api.db.DBApi
+import play.api.Mode
+import play.api.Application
 import play.api.db.{Database => PlayDatabase}
-import play.api.db.slick.DbName
-import play.api.db.slick.IssueTracker
-import play.api.db.slick.SlickApi
+import play.api.db.slick._
+import play.api.Configuration
 import slick.backend.DatabaseConfig
 import slick.driver.JdbcProfile
+import slick.profile._
 import slick.jdbc.DataSourceJdbcDataSource
 import slick.jdbc.HikariCPJdbcDataSource
+import play.api.db.slick.ddl.SlickDDLException
+import play.api.db.slick.ddl.TableScanner
 
-private[ddl] class DBApiAdapter @Inject() (slickApi: SlickApi) extends DBApi {  
+private[ddl] class DBApiAdapter @Inject() (slickApi: SlickApi, configuration: Configuration, app: Application) extends DBApi with HasDatabaseConfig[SqlProfile] {  
+  private val logger = Logger(classOf[DBApiAdapter])
+  val dbConfig = DatabaseConfigProvider.get[SqlProfile](app)
+  configuration.getConfig(DBApiAdapter.configKey).foreach { conf =>
+    conf.keys.map(k => k.split('.').head).foreach { dbs =>
+      val dbConf = conf.getConfig(dbs).get
+      dbConf.keys.foreach { key =>
+        if (key == "ddls") {
+          val packageNames = dbConf.getString(key).getOrElse(throw conf.reportError(key, "Expected key " + key + " but could not get its values!", None)).split(",").toSet
+          if (app.mode != Mode.Prod) {
+            val evolutionsEnabled = !"disabled".equals(app.configuration.getString("evolutionplugin"))
+            if (evolutionsEnabled) {
+              val evolutions = app.getFile("conf/evolutions/" + dbs + "/1.sql");
+              val evolutionsFile = scala.io.Source.fromFile(evolutions)
+              if (!evolutions.exists() || evolutionsFile.mkString.startsWith(DBApiAdapter.CreatedBy)) {
+                evolutionsFile.close()
+                try {
+                  evolutionScript(key, packageNames)(app).foreach { evolutionScript =>
+                    new java.io.File("conf/evolutions/" + key).mkdir()
+                    
+                    java.nio.file.Files.write(java.nio.file.Paths.get("conf/evolutions" + key + "/1.sql"), evolutionScript.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                  }
+                } catch {
+                  case e: SlickDDLException => throw conf.reportError(key, e.message, Some(e))
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   private lazy val databasesByName: Map[DbName, PlayDatabase] = slickApi.dbConfigs[JdbcProfile]().map {
     case (name, dbConfig) => (name, new DBApiAdapter.DatabaseAdapter(name, dbConfig))
   }(collection.breakOut)
 
   override def databases: Seq[PlayDatabase] = databasesByName.values.toSeq
 
-  def database(name: String): PlayDatabase =
+  def evolutionScript(driverName: String, names: Set[String])(app: Application): Option[String] = {
+    import driver.api._
+
+    val ddls = TableScanner.reflectAllDDLMethods(names, driver, app.classloader)
+
+    val delimiter = ";" //TODO: figure this out by asking the db or have a configuration setting?
+
+    if (ddls.nonEmpty) {
+      val ddl = ddls
+          .toSeq.sortBy(a => a.createStatements.mkString ++ a.dropStatements.mkString) //sort to avoid generating different schemas
+          .reduceLeft((a, b) => a.asInstanceOf[driver.SchemaDescription] ++ b.asInstanceOf[driver.SchemaDescription])
+
+      Some(DBApiAdapter.CreatedBy + "Slick DDL\n" +
+        "# To stop Slick DDL generation, remove this comment and start using Evolutions\n" +
+        "\n" +
+        "# --- !Ups\n\n" +
+        ddl.createStatements.mkString("", s"$delimiter\n", s"$delimiter\n") +
+        "\n" +
+        "# --- !Downs\n\n" +
+        ddl.dropStatements.mkString("", s"$delimiter\n", s"$delimiter\n") +
+        "\n")
+    } else None
+  }
+
+  def database(name: String): PlayDatabase = {
     databasesByName.getOrElse(DbName(name), throw new IllegalArgumentException(s"Could not find database for $name"))
+  }
 
   def shutdown(): Unit = {
     // no-op: shutting down dbs is automatically managed by `slickApi`
@@ -32,6 +93,9 @@ private[ddl] class DBApiAdapter @Inject() (slickApi: SlickApi) extends DBApi {
 }
 
 private[ddl] object DBApiAdapter {
+  final val configKey = "slick.dbs"
+  final val CreatedBy = "# --- Created by "
+
   // I don't really like this adapter as it can be used as a trojan horse. Let's keep things simple for the moment,
   // but in the future we may need to become more defensive and provide custom implementation for `java.sql.Connection`
   // and `java.sql.DataSource` to prevent the ability of closing a database connection or database when using this
