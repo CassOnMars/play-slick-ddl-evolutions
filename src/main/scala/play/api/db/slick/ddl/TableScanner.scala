@@ -91,7 +91,7 @@ object TableScanner {
             }.ddl)
           }
         } else if (constructorSymbol.isMethod && insideTable) {
-          logger.info("classToDDL for: " + className + " is argument to table and has constructor")
+          logger.debug("classToDDL for: " + className + " is argument to table and has constructor")
           val constructorMethod = constructorSymbol.asMethod
           val reflectedClass = mirror.reflectClass(classSymbol)
           val constructor = reflectedClass.reflectConstructor(constructorMethod)
