@@ -13,8 +13,10 @@ import play.api.db.slick._
 import play.api.inject.Binding
 import com.google.inject.AbstractModule
 import com.google.inject.name.Names
+import com.google.inject.Injector
 import slick.profile._
 
+@Singleton()
 class DDLEvolutionsModule(environment: Environment, configuration: Configuration) extends AbstractModule {
   def configure() = {
     bind(classOf[DBApi]).to(classOf[DBApiAdapter]).asEagerSingleton
@@ -28,6 +30,7 @@ trait SlickDDLEvolutionsComponents {
   def api: SlickApi
   def configuration: Configuration
   def application: Application
+  def dbConfigProvider: DatabaseConfigProvider
 
-  lazy val dbApi: DBApi = SlickDBApi(api, configuration, application)
+  lazy val dbApi: DBApi = SlickDBApi(api, configuration, application, dbConfigProvider)
 }

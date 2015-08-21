@@ -18,28 +18,31 @@ import slick.jdbc.DataSourceJdbcDataSource
 import slick.jdbc.HikariCPJdbcDataSource
 import play.api.db.slick.ddl.SlickDDLException
 import play.api.db.slick.ddl.TableScanner
+import com.google.inject.Injector
 
-private[ddl] class DBApiAdapter @Inject() (slickApi: SlickApi, configuration: Configuration, app: Application) extends DBApi with HasDatabaseConfig[SqlProfile] {  
+private[ddl] class DBApiAdapter @Inject() (slickApi: SlickApi, configuration: Configuration, app: Application, dbConfigProvider: DatabaseConfigProvider) extends DBApi with HasDatabaseConfig[SqlProfile] {
   private val logger = Logger(classOf[DBApiAdapter])
   val dbConfig = DatabaseConfigProvider.get[SqlProfile](app)
   configuration.getConfig(DBApiAdapter.configKey).foreach { conf =>
-    conf.keys.map(k => k.split('.').head).foreach { dbs =>
-      val dbConf = conf.getConfig(dbs).get
+    conf.keys.map(k => k.split('.').head).foreach { db =>
+      val dbConf = conf.getConfig(db).get
       dbConf.keys.foreach { key =>
         if (key == "ddls") {
           val packageNames = dbConf.getString(key).getOrElse(throw conf.reportError(key, "Expected key " + key + " but could not get its values!", None)).split(",").toSet
           if (app.mode != Mode.Prod) {
             val evolutionsEnabled = !"disabled".equals(app.configuration.getString("evolutionplugin"))
             if (evolutionsEnabled) {
-              val evolutions = app.getFile("conf/evolutions/" + dbs + "/1.sql");
+              val evolutions = app.getFile("conf/evolutions/" + db + "/1.sql");
               val evolutionsFile = scala.io.Source.fromFile(evolutions)
-              if (!evolutions.exists() || evolutionsFile.mkString.startsWith(DBApiAdapter.CreatedBy)) {
+              val existingEvolutions = evolutionsFile.mkString
+              if (!evolutions.exists() || existingEvolutions.startsWith(DBApiAdapter.CreatedBy)) {
                 evolutionsFile.close()
                 try {
-                  evolutionScript(key, packageNames)(app).foreach { evolutionScript =>
-                    new java.io.File("conf/evolutions/" + key).mkdir()
-                    
-                    java.nio.file.Files.write(java.nio.file.Paths.get("conf/evolutions" + key + "/1.sql"), evolutionScript.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                  evolutionScript(key, packageNames, dbConfigProvider)(app).foreach { evolutionScript =>
+                    if (existingEvolutions != evolutionScript) {
+                      new java.io.File("conf/evolutions/" + db).mkdir()
+                      java.nio.file.Files.write(java.nio.file.Paths.get("conf/evolutions/" + db + "/1.sql"), evolutionScript.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                    }
                   }
                 } catch {
                   case e: SlickDDLException => throw conf.reportError(key, e.message, Some(e))
@@ -58,10 +61,10 @@ private[ddl] class DBApiAdapter @Inject() (slickApi: SlickApi, configuration: Co
 
   override def databases: Seq[PlayDatabase] = databasesByName.values.toSeq
 
-  def evolutionScript(driverName: String, names: Set[String])(app: Application): Option[String] = {
+  def evolutionScript(driverName: String, names: Set[String], dbConfigProvider: DatabaseConfigProvider)(app: Application): Option[String] = {
     import driver.api._
 
-    val ddls = TableScanner.reflectAllDDLMethods(names, driver, app.classloader)
+    val ddls = TableScanner.reflectAllDDLMethods(names, driver, app.classloader, dbConfigProvider)
 
     val delimiter = ";" //TODO: figure this out by asking the db or have a configuration setting?
 
