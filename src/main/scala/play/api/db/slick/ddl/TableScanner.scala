@@ -17,6 +17,8 @@ class SlickDDLException(val message: String) extends Exception(message)
 object TableScanner {
   lazy val logger = play.api.Logger(TableScanner.getClass)
 
+  var classCache: List[String] = List()
+
   type DDL = slick.profile.SqlProfile#DDL
 
   private def subTypeOf(sym: Symbol, subTypeSymbol: Symbol) = {
@@ -24,7 +26,7 @@ object TableScanner {
   }
 
   private def scanModulesAndFields(driver: slick.profile.SqlProfile, baseSym: ModuleSymbol, name: String)(implicit mirror: Mirror): Set[(Symbol, DDL)] = {
-    logger.debug("scanModulesAndFields for: " + name)
+    println("scanModulesAndFields for: " + name)
 
     val baseInstance = mirror.reflectModule(baseSym).instance
 
@@ -43,13 +45,13 @@ object TableScanner {
     }
 
     val foundInstances: List[(Symbol, Any)] = if (subTypeOf(outerSym, tableQueryTypeSymbol) && !isWildCard) { //name was referencing a specific value
-      logger.debug("scanModulesAndFields for: found table query instance (not wildcard): " + name)
+      println("scanModulesAndFields for: found table query instance (not wildcard): " + name)
       List(baseSym -> outerInstance)
     } else if (isWildCard) {
       //wildcard so we scan the instance we found for table queries
       val instancesNsyms = ReflectionUtils.scanModuleOrFieldByReflection(baseSym, outerSym, outerInstance)(subTypeOf(_, tableQueryTypeSymbol))
-      if (instancesNsyms.isEmpty) logger.warn("Scanned object: '" + baseSym.fullName + "' for '" + name + "' but did not find any Slick Tables")
-      logger.debug("scanModulesAndFields for: found " + instancesNsyms.size + " sub-instances (wildcard): " + name)
+      if (instancesNsyms.isEmpty) println("w: Scanned object: '" + baseSym.fullName + "' for '" + name + "' but did not find any Slick Tables")
+      println("scanModulesAndFields for: found " + instancesNsyms.size + " sub-instances (wildcard): " + name)
       instancesNsyms
     } else {
       throw new SlickDDLException("Found a matching object: '" + baseSym.fullName + "' for '" + name + "' but it is not a Slick Table and a wildcard was not specified")
@@ -72,63 +74,71 @@ object TableScanner {
   }
 
   private def classToDDL(driver: slick.profile.SqlProfile, className: String, tableSymbol: Symbol, dbConfigProvider: DatabaseConfigProvider)(implicit mirror: Mirror): Option[(Symbol, DDL)] = {
-    def construct(className: String, insideTable: Boolean): Any = {
+    def construct(className: String, depth: Int): Any = {
       try {
-        logger.debug("classToDDL for: " + className)
-        val classSymbol = mirror.staticClass(className)
-        val constructorSymbol = classSymbol.typeSignature.decl(universe.termNames.CONSTRUCTOR)
-        if (subTypeOf(classSymbol, tableSymbol) && constructorSymbol.isMethod) {
-          logger.debug("classToDDL for: " + className + " is table and has constructor")
-          val constructorMethod = constructorSymbol.asMethod
-          val reflectedClass = mirror.reflectClass(classSymbol)
-          val constructor = reflectedClass.reflectConstructor(constructorMethod)
-          import driver.simple._
-          logSlickException {
-            Some(classSymbol -> TableQuery { tag =>
-              val constructorParameters = constructorMethod.paramLists.flatMap { l => l.map(m => m.typeSignature.toString) }.dropRight(1).map(m => construct(m, true)) :+ tag
-              val instance = constructor(constructorParameters:_*)
-              instance.asInstanceOf[Table[_]]
-            }.ddl)
-          }
-        } else if (constructorSymbol.isMethod && insideTable) {
-          logger.debug("classToDDL for: " + className + " is argument to table and has constructor")
-          val constructorMethod = constructorSymbol.asMethod
-          val reflectedClass = mirror.reflectClass(classSymbol)
-          val constructor = reflectedClass.reflectConstructor(constructorMethod)
-          val constructorParameters = constructorMethod.paramLists.flatMap { l => l.map(m => {
-            logger.debug("classToDDL for: " + className + " has argument of type: " + m.typeSignature.toString)
-            m.typeSignature.toString
-          }) }.map(m => construct(m, true))
-          constructor(constructorParameters:_*)
-        } else if (className == "play.api.db.slick.DatabaseConfigProvider") {
-          logger.debug("classToDDL for: injecting instance of " + className)
+        if (className == "play.api.db.slick.DatabaseConfigProvider") {
           dbConfigProvider
         } else {
-          null
+          classCache = className :: classCache
+          println("classToDDL for: " + className)
+          val classSymbol = mirror.staticClass(className)
+          val constructorSymbol = classSymbol.typeSignature.decl(universe.termNames.CONSTRUCTOR)
+          if (subTypeOf(classSymbol, tableSymbol) && constructorSymbol.isMethod) {
+            println("classToDDL for: " + className + " is table and has constructor")
+            val constructorMethod = constructorSymbol.asMethod
+            val reflectedClass = mirror.reflectClass(classSymbol)
+            val constructor = reflectedClass.reflectConstructor(constructorMethod)
+            import driver.simple._
+            logSlickException {
+              Some(classSymbol -> TableQuery { tag =>
+                val constructorParameters = constructorMethod.paramLists.flatMap { l => l.map(m => m.typeSignature.toString) }.dropRight(1).map(m => construct(m, depth + 1)) :+ tag
+                val instance = constructor(constructorParameters:_*)
+                instance.asInstanceOf[Table[_]]
+              }.ddl)
+            }
+          } else if (constructorSymbol.isMethod && depth > 0) {
+            println("classToDDL for: " + className + " is argument to table and has constructor")
+            val constructorMethod = constructorSymbol.asMethod
+            val reflectedClass = mirror.reflectClass(classSymbol)
+            val constructor = reflectedClass.reflectConstructor(constructorMethod)
+            val constructorParameters = constructorMethod.paramLists.flatMap { l => l.map(m => {
+              println("classToDDL for: " + className + " has argument of type: " + m.typeSignature.toString)
+              m.typeSignature.toString
+            }) }.map(m => if (depth > 2) { println("Using null for existing class " + className); null } else { construct(m, depth + 1) })
+
+            constructor(constructorParameters:_*)
+          } else if (className == "play.api.db.slick.DatabaseConfigProvider") {
+            println("classToDDL for: injecting instance of " + className)
+            dbConfigProvider
+          } else {
+            null
+          }
         }
       } catch {
         case e: IllegalArgumentException =>
-          logger.warn("Found a Slick table: " + className + ", but it does not have a constructor without arguments. Cannot create DDL for this class")
+          println("w: Found a Slick table: " + className + ", but it does not have a constructor without arguments. Cannot create DDL for this class")
           None
         case e: InstantiationException =>
-          logger.warn("Could not initialize " + className + ". DDL Generation will be skipped.")
+          println("w: Could not initialize " + className + ". DDL Generation will be skipped.")
           null
         case e: MissingRequirementError =>
-          logger.info("MissingRequirementError for " + className + ". Probably means this is not a class. DDL Generation will be skipped.")
+          println("i: MissingRequirementError for " + className + ". Probably means this is not a class. DDL Generation will be skipped.")
           null
         case e: ScalaReflectionException =>
-          logger.info("ScalaReflectionException for " + className + ". Probably means this is not a class. DDL Generation will be skipped.")
+          println("i: ScalaReflectionException for " + className + ". Probably means this is not a class. DDL Generation will be skipped.")
           null
         case e: AssertionError if e.getMessage.contains("not a type") =>
-          logger.info(s"Class $className couldn't be reflected into a Scala symbol. DDL Generation will be skipped: ${e.getMessage}")
+          println(s"i: Class $className couldn't be reflected into a Scala symbol. DDL Generation will be skipped: ${e.getMessage}")
           null
         case e: AssertionError if e.getMessage.contains("no symbol could be loaded") =>
-          logger.info(s"Class $className couldn't be reflected into a Scala symbol. DDL Generation will be skipped: ${e.getMessage}")
+          println(s"i: Class $className couldn't be reflected into a Scala symbol. DDL Generation will be skipped: ${e.getMessage}")
+          null
+        case e: Exception => 
           null
       }
     }
 
-    construct(className, false) match {
+    construct(className, 0) match {
       case Some((sym: Symbol, ddl: DDL)) => Some((sym, ddl))
       case null => None
     }
@@ -160,11 +170,11 @@ object TableScanner {
       val maybeModule: Option[ModuleSymbol] = ReflectionUtils.findFirstModule(name)
       val currentDDLs = maybeModule match {
         case Some(moduleSymbol) =>
-          logger.debug(name + " is a module: scanning... ")
+          println(name + " is a module: scanning... ")
           val instaniatedDDLs = scanModulesAndFields(driver, moduleSymbol, name)
           instaniatedDDLs
         case None =>
-          logger.debug(name + " is not a module: checking if wildcard and converting classes...")
+          println(name + " is not a module: checking if wildcard and converting classes...")
           val classDDLs = (name match {
             case WildcardPattern(packageName) => scanPackage(packageName, classloader)
             case name => Set(name)
@@ -178,7 +188,7 @@ object TableScanner {
       currentDDLs
     }
 
-    logger.debug(s"reflectAllDDLMethods(), will generate DDL for: ${ddls.toMap.keys.map(_.fullName).mkString(", ")}")
+    println(s"reflectAllDDLMethods(), will generate DDL for: ${ddls.toMap.keys.map(_.fullName).mkString(", ")}")
 
     ddls.groupBy(_._1.fullName).flatMap {
       case (name, ddls) =>

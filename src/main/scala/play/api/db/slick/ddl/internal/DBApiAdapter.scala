@@ -3,6 +3,7 @@ package play.api.db.slick.ddl.internal
 import java.sql.Connection
 
 import javax.inject.Inject
+import javax.inject.Singleton
 import javax.sql.DataSource
 import play.api.Logger
 import play.api.db.DBApi
@@ -20,35 +21,33 @@ import play.api.db.slick.ddl.SlickDDLException
 import play.api.db.slick.ddl.TableScanner
 import com.google.inject.Injector
 
+@Singleton()
 private[ddl] class DBApiAdapter @Inject() (slickApi: SlickApi, configuration: Configuration, app: Application, dbConfigProvider: DatabaseConfigProvider) extends DBApi with HasDatabaseConfig[SqlProfile] {
   private val logger = Logger(classOf[DBApiAdapter])
+  println("DBApiAdapter constructor invoked")
+  Thread.dumpStack()
   val dbConfig = DatabaseConfigProvider.get[SqlProfile](app)
   configuration.getConfig(DBApiAdapter.configKey).foreach { conf =>
-    conf.keys.map(k => k.split('.').head).foreach { db =>
-      val dbConf = conf.getConfig(db).get
-      dbConf.keys.foreach { key =>
-        if (key == "ddls") {
-          val packageNames = dbConf.getString(key).getOrElse(throw conf.reportError(key, "Expected key " + key + " but could not get its values!", None)).split(",").toSet
-          if (app.mode != Mode.Prod) {
-            val evolutionsEnabled = !"disabled".equals(app.configuration.getString("evolutionplugin"))
-            if (evolutionsEnabled) {
-              val evolutions = app.getFile("conf/evolutions/" + db + "/1.sql");
-              val evolutionsFile = scala.io.Source.fromFile(evolutions)
-              val existingEvolutions = evolutionsFile.mkString
-              if (!evolutions.exists() || existingEvolutions.startsWith(DBApiAdapter.CreatedBy)) {
-                evolutionsFile.close()
-                try {
-                  evolutionScript(key, packageNames, dbConfigProvider)(app).foreach { evolutionScript =>
-                    if (existingEvolutions != evolutionScript) {
-                      new java.io.File("conf/evolutions/" + db).mkdir()
-                      java.nio.file.Files.write(java.nio.file.Paths.get("conf/evolutions/" + db + "/1.sql"), evolutionScript.getBytes(java.nio.charset.StandardCharsets.UTF_8))
-                    }
-                  }
-                } catch {
-                  case e: SlickDDLException => throw conf.reportError(key, e.message, Some(e))
-                }
+    println("Scanning config " + conf.keys)
+    val dbConf = conf.keys.head
+    val packageNames = conf.getString(dbConf).getOrElse("").split(",").toSet
+    if (app.mode != Mode.Prod) {
+      val evolutionsEnabled = !"disabled".equals(app.configuration.getString("evolutionplugin"))
+      if (evolutionsEnabled) {
+        val evolutions = app.getFile("conf/evolutions/" + dbConf + "/1.sql");
+        val evolutionsFile = scala.io.Source.fromFile(evolutions)
+        val existingEvolutions = evolutionsFile.mkString
+        if (!evolutions.exists() || existingEvolutions.startsWith(DBApiAdapter.CreatedBy)) {
+          evolutionsFile.close()
+          try {
+            evolutionScript(dbConf, packageNames, dbConfigProvider)(app).foreach { evolutionScript =>
+              if (existingEvolutions != evolutionScript) {
+                new java.io.File("conf/evolutions/" + dbConf).mkdir()
+                java.nio.file.Files.write(java.nio.file.Paths.get("conf/evolutions/" + dbConf + "/1.sql"), evolutionScript.getBytes(java.nio.charset.StandardCharsets.UTF_8))
               }
             }
+          } catch {
+            case e: SlickDDLException => throw conf.reportError(dbConf, e.message, Some(e))
           }
         }
       }
@@ -96,7 +95,7 @@ private[ddl] class DBApiAdapter @Inject() (slickApi: SlickApi, configuration: Co
 }
 
 private[ddl] object DBApiAdapter {
-  final val configKey = "slick.dbs"
+  final val configKey = "slick.ddls"
   final val CreatedBy = "# --- Created by "
 
   // I don't really like this adapter as it can be used as a trojan horse. Let's keep things simple for the moment,

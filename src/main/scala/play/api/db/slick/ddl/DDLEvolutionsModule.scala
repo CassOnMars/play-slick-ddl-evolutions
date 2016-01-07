@@ -16,10 +16,9 @@ import com.google.inject.name.Names
 import com.google.inject.Injector
 import slick.profile._
 
-@Singleton()
 class DDLEvolutionsModule(environment: Environment, configuration: Configuration) extends AbstractModule {
   def configure() = {
-    bind(classOf[DBApi]).to(classOf[DBApiAdapter]).asEagerSingleton
+    bind(classOf[DBApi]).to(classOf[DBApiAdapter]).in(classOf[Singleton])
   }
 }
 

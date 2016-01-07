@@ -1,6 +1,8 @@
 name := """play-slick-ddl-evolutions"""
 
-version := "1.0"
+version := "1.0-SNAPSHOT"
+
+organization := "com.antidecorum"
 
 scalaVersion := "2.11.7"
 
